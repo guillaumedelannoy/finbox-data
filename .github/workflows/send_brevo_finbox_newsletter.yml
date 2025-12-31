@@ -94,8 +94,12 @@ jobs:
 
           with open("newsletter.html", "r", encoding="utf-8") as f:
             html = f.read().strip()
+          if not html:
+            raise SystemExit("newsletter.html is empty.")
 
           recipients = [e.strip() for e in os.environ["RECIPIENTS"].split(",") if e.strip()]
+          if not recipients:
+            raise SystemExit("RECIPIENTS is empty after parsing.")
           to = [{"email": e} for e in recipients]
 
           subject_prefix = os.environ.get("SUBJECT_PREFIX") or "Finbox Daily"
@@ -103,10 +107,7 @@ jobs:
           subject = f"{subject_prefix} — {today}"
 
           payload = {
-            "sender": {
-              "name": os.environ["SENDER_NAME"],
-              "email": os.environ["SENDER_EMAIL"]
-            },
+            "sender": {"name": os.environ["SENDER_NAME"], "email": os.environ["SENDER_EMAIL"]},
             "to": to,
             "subject": subject,
             "htmlContent": html
