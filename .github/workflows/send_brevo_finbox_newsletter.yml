@@ -2,12 +2,15 @@ name: Send Brevo newsletter (Finbox HTML) — hourly + Paris gate + send only if
 
 on:
   schedule:
-    - cron: "0 * * * *"   # run hourly (UTC)
+    - cron: "0 * * * *" # hourly (UTC)
   workflow_dispatch:
 
 concurrency:
   group: brevo-finbox-newsletter
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   send:
@@ -23,6 +26,21 @@ jobs:
             echo "Not 09:32 in Europe/Paris. Exiting."
             exit 0
           fi
+
+      - name: Checkout repo (to read/write last hash)
+        uses: actions/checkout@v4
+
+      - name: Read last sent hash from repo file
+        id: last
+        shell: bash
+        run: |
+          if [ -f .last_sent_hash.txt ]; then
+            LAST=$(cat .last_sent_hash.txt | tr -d '\n' || true)
+          else
+            LAST=""
+          fi
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+          echo "Last hash: ${LAST:-<none>}"
 
       - name: Fetch remote HTML
         shell: bash
@@ -40,24 +58,13 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Remote SHA256: $SHA"
 
-      - name: Restore last sent hash (cache)
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: .last_sent_hash
-          key: finbox-newsletter-last-hash
-
       - name: Decide whether to send
         id: decide
         shell: bash
         run: |
           CURRENT="${{ steps.hash.outputs.sha }}"
-          LAST=""
-          if [ -f .last_sent_hash/hash.txt ]; then
-            LAST=$(cat .last_sent_hash/hash.txt | tr -d '\n' || true)
-          fi
-          echo "Last SHA256: ${LAST:-<none>}"
-          if [ "$CURRENT" = "$LAST" ]; then
+          LAST="${{ steps.last.outputs.last }}"
+          if [ "$CURRENT" = "$LAST" ] && [ -n "$CURRENT" ]; then
             echo "No change detected. Skipping send."
             echo "send=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -128,17 +135,15 @@ jobs:
             raise SystemExit(f"Brevo HTTPError {e.code}: {err}")
           PY
 
-      - name: Update last sent hash
+      - name: Update last hash file + commit (only after successful send)
         if: steps.decide.outputs.send == 'true'
         shell: bash
         run: |
-          mkdir -p .last_sent_hash
-          echo "${{ steps.hash.outputs.sha }}" > .last_sent_hash/hash.txt
-          echo "Stored new hash."
+          echo "${{ steps.hash.outputs.sha }}" > .last_sent_hash.txt
 
-      - name: Save last sent hash (cache)
-        if: steps.decide.outputs.send == 'true'
-        uses: actions/cache@v4
-        with:
-          path: .last_sent_hash
-          key: finbox-newsletter-last-hash
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .last_sent_hash.txt
+          git commit -m "Update last sent hash" || exit 0
+          git push
