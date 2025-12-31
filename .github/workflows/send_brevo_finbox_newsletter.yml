@@ -1,9 +1,18 @@
-name: Send Brevo newsletter (Finbox HTML) — hourly + Paris gate + send only if changed
+name: Send Brevo newsletter (Finbox HTML) — hourly + Paris gate + send only if changed (+manual overrides)
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 * * * *"   # hourly (UTC)
   workflow_dispatch:
+    inputs:
+      force_send:
+        description: "Manual: bypass 09:32 gate"
+        required: false
+        default: "false"
+      force_send_even_if_unchanged:
+        description: "Manual: send even if HTML hash is unchanged"
+        required: false
+        default: "false"
 
 concurrency:
   group: brevo-finbox-newsletter
@@ -16,9 +25,9 @@ jobs:
   send:
     runs-on: ubuntu-latest
     steps:
-      - name: Gate (09:32 Europe/Paris)
+      - name: Gate (09:32 Europe/Paris) + manual bypass
         shell: bash
-        run: 'PARIS_HM=$(TZ=Europe/Paris date +%H:%M); echo "Paris time: $PARIS_HM"; if [ "$PARIS_HM" != "09:32" ]; then echo "Not 09:32. Exiting."; exit 0; fi'
+        run: 'if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_send }}" = "true" ]; then echo "Manual bypass enabled. Continuing."; exit 0; fi; PARIS_HM=$(TZ=Europe/Paris date +%H:%M); echo "Paris time: $PARIS_HM"; if [ "$PARIS_HM" != "09:32" ]; then echo "Not 09:32. Exiting."; exit 0; fi'
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +49,24 @@ jobs:
       - name: Decide
         id: decide
         shell: bash
-        run: 'CURRENT="${{ steps.hash.outputs.sha }}"; LAST="${{ steps.last.outputs.last }}"; if [ "$CURRENT" = "$LAST" ] && [ -n "$CURRENT" ]; then echo "No change. Skip."; echo "send=false" >> "$GITHUB_OUTPUT"; exit 0; fi; echo "Changed. Send."; echo "send=true" >> "$GITHUB_OUTPUT"'
+        run: |
+          CURRENT="${{ steps.hash.outputs.sha }}"
+          LAST="${{ steps.last.outputs.last }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_send_even_if_unchanged }}" = "true" ]; then
+            echo "Manual override: sending even if unchanged."
+            echo "send=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$CURRENT" = "$LAST" ] && [ -n "$CURRENT" ]; then
+            echo "No change. Skip."
+            echo "send=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed. Send."
+          echo "send=true" >> "$GITHUB_OUTPUT"
 
       - name: Send via Brevo
         if: steps.decide.outputs.send == 'true'
@@ -71,7 +97,8 @@ jobs:
 
           subject_prefix = os.environ.get("SUBJECT_PREFIX") or "Finbox Daily"
           today = datetime.datetime.now().strftime("%Y-%m-%d")
-          subject = f"{subject_prefix} — {today}"
+          is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+          subject = f"{subject_prefix} — {today}" + (" [TEST]" if is_manual else "")
 
           payload = {
             "sender": {"name": os.environ["SENDER_NAME"], "email": os.environ["SENDER_EMAIL"]},
