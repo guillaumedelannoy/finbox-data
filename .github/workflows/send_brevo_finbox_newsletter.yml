@@ -2,7 +2,7 @@ name: Send Brevo newsletter (Finbox HTML) — hourly + Paris gate + send only if
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 * * * *"   # hourly (UTC)
   workflow_dispatch:
 
 concurrency:
@@ -27,15 +27,15 @@ jobs:
             exit 0
           fi
 
-      - name: Checkout repo (to read/write last hash)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Read last sent hash from repo file
+      - name: Read last sent hash (if exists)
         id: last
         shell: bash
         run: |
           if [ -f .last_sent_hash.txt ]; then
-            LAST=$(cat .last_sent_hash.txt | tr -d '\n' || true)
+            LAST=$(cat .last_sent_hash.txt | tr -d '\n')
           else
             LAST=""
           fi
@@ -50,13 +50,13 @@ jobs:
           test -s newsletter.html
           echo "Fetched HTML size: $(wc -c < newsletter.html) bytes"
 
-      - name: Compute remote HTML hash
+      - name: Compute HTML hash
         id: hash
         shell: bash
         run: |
           SHA=$(sha256sum newsletter.html | awk '{print $1}')
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Remote SHA256: $SHA"
+          echo "Current hash: $SHA"
 
       - name: Decide whether to send
         id: decide
@@ -64,11 +64,13 @@ jobs:
         run: |
           CURRENT="${{ steps.hash.outputs.sha }}"
           LAST="${{ steps.last.outputs.last }}"
+
           if [ "$CURRENT" = "$LAST" ] && [ -n "$CURRENT" ]; then
             echo "No change detected. Skipping send."
             echo "send=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           echo "Change detected. Will send."
           echo "send=true" >> "$GITHUB_OUTPUT"
 
@@ -88,16 +90,12 @@ jobs:
           required = ["BREVO_API_KEY", "SENDER_EMAIL", "SENDER_NAME", "RECIPIENTS"]
           missing = [k for k in required if not os.environ.get(k)]
           if missing:
-            raise SystemExit(f"Missing required secrets/env: {missing}")
+            raise SystemExit(f"Missing secrets: {missing}")
 
           with open("newsletter.html", "r", encoding="utf-8") as f:
             html = f.read().strip()
-          if not html:
-            raise SystemExit("newsletter.html is empty.")
 
           recipients = [e.strip() for e in os.environ["RECIPIENTS"].split(",") if e.strip()]
-          if not recipients:
-            raise SystemExit("RECIPIENTS is empty after parsing.")
           to = [{"email": e} for e in recipients]
 
           subject_prefix = os.environ.get("SUBJECT_PREFIX") or "Finbox Daily"
@@ -105,15 +103,14 @@ jobs:
           subject = f"{subject_prefix} — {today}"
 
           payload = {
-            "sender": {"name": os.environ["SENDER_NAME"], "email": os.environ["SENDER_EMAIL"]},
+            "sender": {
+              "name": os.environ["SENDER_NAME"],
+              "email": os.environ["SENDER_EMAIL"]
+            },
             "to": to,
             "subject": subject,
             "htmlContent": html
           }
-
-          print("Sending to:", recipients)
-          print("Sender:", payload["sender"])
-          print("Subject:", subject)
 
           req = urllib.request.Request(
             "https://api.brevo.com/v3/smtp/email",
@@ -128,14 +125,13 @@ jobs:
 
           try:
             with urllib.request.urlopen(req) as resp:
-              body = resp.read().decode("utf-8")
-              print("Brevo response:", body)
+              print("Brevo response:", resp.read().decode())
           except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")
             raise SystemExit(f"Brevo HTTPError {e.code}: {err}")
           PY
 
-      - name: Update last hash file + commit (only after successful send)
+      - name: Save hash + commit
         if: steps.decide.outputs.send == 'true'
         shell: bash
         run: |
