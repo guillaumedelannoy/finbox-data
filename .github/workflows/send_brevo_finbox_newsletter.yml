@@ -1,0 +1,143 @@
+name: Send Brevo newsletter (Finbox HTML) — hourly + Paris gate + send only if changed
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # run hourly (UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: brevo-finbox-newsletter
+  cancel-in-progress: true
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate: only run at 09:32 Europe/Paris
+        shell: bash
+        run: |
+          PARIS_HM=$(TZ=Europe/Paris date +%H:%M)
+          echo "Paris time is: $PARIS_HM"
+          if [ "$PARIS_HM" != "09:32" ]; then
+            echo "Not 09:32 in Europe/Paris. Exiting."
+            exit 0
+          fi
+
+      # Compute the current remote content hash (no need to checkout the repo)
+      - name: Compute remote HTML hash
+        id: hash
+        shell: bash
+        run: |
+          set -e
+          URL="https://raw.githubusercontent.com/guillaumedelannoy/finbox-data/main/Data/newsletter_payload_latest.html"
+          curl -fsSL "$URL" -o newsletter.html
+          test -s newsletter.html
+          SHA=$(sha256sum newsletter.html | awk '{print $1}')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Remote SHA256: $SHA"
+
+      # Use GitHub Actions cache to remember last sent hash across runs
+      - name: Restore last sent hash (cache)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .last_sent_hash
+          key: finbox-newsletter-last-hash
+
+      - name: Decide whether to send
+        id: decide
+        shell: bash
+        run: |
+          set -e
+          CURRENT="${{ steps.hash.outputs.sha }}"
+          LAST=""
+          if [ -f .last_sent_hash/hash.txt ]; then
+            LAST=$(cat .last_sent_hash/hash.txt | tr -d '\n' || true)
+          fi
+          echo "Last SHA256: ${LAST:-<none>}"
+          if [ "$CURRENT" = "$LAST" ]; then
+            echo "No change detected. Skipping send."
+            echo "send=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Change detected. Will send."
+          echo "send=true" >> "$GITHUB_OUTPUT"
+
+      - name: Send via Brevo Transactional API
+        if: steps.decide.outputs.send == 'true'
+        env:
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SENDER_NAME: ${{ secrets.SENDER_NAME }}
+          RECIPIENTS: ${{ secrets.RECIPIENTS }} # comma-separated emails
+          SUBJECT_PREFIX: ${{ secrets.SUBJECT_PREFIX }} # optional
+        shell: bash
+        run: |
+          python - << 'PY'
+          import os, json, datetime, urllib.request, urllib.error
+
+          required = ["BREVO_API_KEY", "SENDER_EMAIL", "SENDER_NAME", "RECIPIENTS"]
+          missing = [k for k in required if not os.environ.get(k)]
+          if missing:
+            raise SystemExit(f"Missing required secrets/env: {missing}")
+
+          with open("newsletter.html", "r", encoding="utf-8") as f:
+            html = f.read().strip()
+          if not html:
+            raise SystemExit("newsletter.html is empty.")
+
+          recipients = [e.strip() for e in os.environ["RECIPIENTS"].split(",") if e.strip()]
+          if not recipients:
+            raise SystemExit("RECIPIENTS is empty after parsing.")
+          to = [{"email": e} for e in recipients]
+
+          subject_prefix = os.environ.get("SUBJECT_PREFIX") or "Finbox Daily"
+          today = datetime.datetime.now().strftime("%Y-%m-%d")
+          subject = f"{subject_prefix} — {today}"
+
+          payload = {
+            "sender": {"name": os.environ["SENDER_NAME"], "email": os.environ["SENDER_EMAIL"]},
+            "to": to,
+            "subject": subject,
+            "htmlContent": html
+          }
+
+          print("Sending to:", recipients)
+          print("Sender:", payload["sender"])
+          print("Subject:", subject)
+
+          req = urllib.request.Request(
+            "https://api.brevo.com/v3/smtp/email",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+              "api-key": os.environ["BREVO_API_KEY"],
+              "Content-Type": "application/json",
+              "accept": "application/json"
+            },
+            method="POST"
+          )
+
+          try:
+            with urllib.request.urlopen(req) as resp:
+              body = resp.read().decode("utf-8")
+              print("Brevo response:", body)
+          except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")
+            raise SystemExit(f"Brevo HTTPError {e.code}: {err}")
+          PY
+
+      # Update the cached hash only after a successful send
+      - name: Update last sent hash
+        if: steps.decide.outputs.send == 'true'
+        shell: bash
+        run: |
+          mkdir -p .last_sent_hash
+          echo "${{ steps.hash.outputs.sha }}" > .last_sent_hash/hash.txt
+          echo "Stored new hash."
+
+      - name: Save last sent hash (cache)
+        if: steps.decide.outputs.send == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .last_sent_hash
+          key: finbox-newsletter-last-hash
