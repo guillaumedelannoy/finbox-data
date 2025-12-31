@@ -12,6 +12,7 @@ concurrency:
 jobs:
   send:
     runs-on: ubuntu-latest
+
     steps:
       - name: Gate: only run at 09:32 Europe/Paris
         shell: bash
@@ -23,20 +24,22 @@ jobs:
             exit 0
           fi
 
-      # Compute the current remote content hash (no need to checkout the repo)
+      - name: Fetch remote HTML
+        shell: bash
+        run: |
+          URL="https://raw.githubusercontent.com/guillaumedelannoy/finbox-data/main/Data/newsletter_payload_latest.html"
+          curl -fsSL "$URL" -o newsletter.html
+          test -s newsletter.html
+          echo "Fetched HTML size: $(wc -c < newsletter.html) bytes"
+
       - name: Compute remote HTML hash
         id: hash
         shell: bash
         run: |
-          set -e
-          URL="https://raw.githubusercontent.com/guillaumedelannoy/finbox-data/main/Data/newsletter_payload_latest.html"
-          curl -fsSL "$URL" -o newsletter.html
-          test -s newsletter.html
           SHA=$(sha256sum newsletter.html | awk '{print $1}')
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Remote SHA256: $SHA"
 
-      # Use GitHub Actions cache to remember last sent hash across runs
       - name: Restore last sent hash (cache)
         id: cache
         uses: actions/cache@v4
@@ -48,7 +51,6 @@ jobs:
         id: decide
         shell: bash
         run: |
-          set -e
           CURRENT="${{ steps.hash.outputs.sha }}"
           LAST=""
           if [ -f .last_sent_hash/hash.txt ]; then
@@ -69,8 +71,8 @@ jobs:
           BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_NAME: ${{ secrets.SENDER_NAME }}
-          RECIPIENTS: ${{ secrets.RECIPIENTS }} # comma-separated emails
-          SUBJECT_PREFIX: ${{ secrets.SUBJECT_PREFIX }} # optional
+          RECIPIENTS: ${{ secrets.RECIPIENTS }}
+          SUBJECT_PREFIX: ${{ secrets.SUBJECT_PREFIX }}
         shell: bash
         run: |
           python - << 'PY'
@@ -126,7 +128,6 @@ jobs:
             raise SystemExit(f"Brevo HTTPError {e.code}: {err}")
           PY
 
-      # Update the cached hash only after a successful send
       - name: Update last sent hash
         if: steps.decide.outputs.send == 'true'
         shell: bash
