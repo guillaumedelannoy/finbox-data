@@ -122,7 +122,27 @@ jobs:
             raise SystemExit(f"Brevo HTTPError {e.code}: {err}")
           PY
 
-      - name: Save hash + commit
+      - name: Save hash + commit (rebase + retry)
         if: steps.decide.outputs.send == 'true'
         shell: bash
-        run: 'echo "${{ steps.hash.outputs.sha }}" > .last_sent_hash.txt; git config user.name "github-actions[bot]"; git config user.email "github-actions[bot]@users.noreply.github.com"; git add .last_sent_hash.txt; git commit -m "Update last sent hash" || exit 0; git push'
+        run: |
+          echo "${{ steps.hash.outputs.sha }}" > .last_sent_hash.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .last_sent_hash.txt
+          git commit -m "Update last sent hash" || exit 0
+
+          for i in 1 2 3; do
+            git pull --rebase origin main || true
+            if git push origin HEAD:main; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push failed (attempt $i). Retrying..."
+            sleep 2
+          done
+
+          echo "Push failed after retries."
+          exit 1
